@@ -259,23 +259,17 @@ class BlockProcessor:
             except FileNotFoundError:
                 return await self.daemon.raw_blocks(hex_hashes)
 
-        def flush_backup():
-            # self.touched can include other addresses which is
-            # harmless, but remove None.
-            self.touched.discard(None)
-            self.db.flush_backup(self.flush_data(), self.touched)
-
         try:
             await self.flush(True)
             start, last, hashes = await self.reorg_hashes(count)
             # Reverse and convert to hex strings.
             hashes = [hash_to_hex_str(hash) for hash in reversed(hashes)]
             self.logger.info("reorg %i block hashes", len(hashes))
+
             for hex_hashes in chunks(hashes, 50):
                 raw_blocks = await get_raw_blocks(last, hex_hashes)
                 self.logger.info("got %i raw blocks", len(raw_blocks))
                 await self.run_in_thread_with_lock(self.backup_blocks, raw_blocks)
-                await self.run_in_thread_with_lock(flush_backup)
                 last -= len(raw_blocks)
 
             await self.run_in_thread_with_lock(self.db.sql.delete_claims_above_height, self.height)
@@ -427,8 +421,8 @@ class BlockProcessor:
         self.block_txs.append((b''.join(tx_hash for tx, tx_hash in txs), [tx.raw for tx, _ in txs]))
 
         undo_info = []
-        tx_num = self.tx_count
         hashXs_by_tx = []
+        tx_num = self.tx_count
 
         # Use local vars for speed in the loops
         put_utxo = self.utxo_cache.__setitem__
@@ -473,7 +467,6 @@ class BlockProcessor:
                 _unflushed[_hashX].append(_tx_num)
             _count += len(_hashXs)
         self.db.hist_unflushed_count += _count
-
         self.tx_count = tx_num
         self.db.tx_counts.append(tx_num)
 
@@ -504,6 +497,10 @@ class BlockProcessor:
             self.height -= 1
             self.db.tx_counts.pop()
 
+        # self.touched can include other addresses which is
+        # harmless, but remove None.
+        self.touched.discard(None)
+        self.db.flush_backup(self.flush_data(), self.touched)
         self.logger.info(f'backed up to height {self.height:,d}')
 
     def backup_txs(self, txs):
