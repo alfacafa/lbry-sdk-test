@@ -1,15 +1,20 @@
 import logging
 import asyncio
 import json
+import typing
+import struct
 from time import perf_counter
 from operator import itemgetter
+from collections import defaultdict
 from typing import Dict, Optional, Tuple
 import aiohttp
 
 from lbry import __version__
+from lbry.utils import resolve_host
 from lbry.error import IncompatibleWalletServerError
 from lbry.wallet.rpc import RPCSession as BaseClientSession, Connector, RPCError, ProtocolError
 from lbry.wallet.stream import StreamController
+from lbry.wallet.server.udp import PingPacket, PongPacket
 
 log = logging.getLogger(__name__)
 
@@ -341,6 +346,37 @@ class Network:
             return result['result']
 
 
+class SPVStatusClientProtocol(asyncio.DatagramProtocol):
+    PROTOCOL_VERSION = 1
+
+    def __init__(self, responses: asyncio.Queue):
+        super().__init__()
+        self.transport: Optional[asyncio.transports.DatagramTransport] = None
+        self.responses = responses
+        self._ping_packet = PingPacket.make(self.PROTOCOL_VERSION)
+
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
+        try:
+            self.responses.put_nowait(((addr, perf_counter()), PongPacket.decode(data)))
+        except (ValueError, struct.error, AttributeError, TypeError, RuntimeError):
+            return
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        log.info("closed udp client")
+        self.transport = None
+
+    def ping(self, server: Tuple[str, int]):
+        self.transport.sendto(self._ping_packet, server)
+
+    def close(self):
+        log.info("close udp client")
+        if self.transport:
+            self.transport.close()
+
+
 class SessionPool:
 
     def __init__(self, network: Network, timeout: float):
@@ -348,6 +384,7 @@ class SessionPool:
         self.sessions: Dict[ClientSession, Optional[asyncio.Task]] = dict()
         self.timeout = timeout
         self.new_connection_event = asyncio.Event()
+        self._default_servers = []
 
     @property
     def online(self):
@@ -368,56 +405,108 @@ class SessionPool:
         )[1]
 
     def _get_session_connect_callback(self, session: ClientSession):
-        loop = asyncio.get_event_loop()
+        # loop = asyncio.get_event_loop()
 
         def callback():
-            duplicate_connections = [
-                s for s in self.sessions
-                if s is not session and s.server_address_and_port == session.server_address_and_port
-            ]
-            already_connected = None if not duplicate_connections else duplicate_connections[0]
-            if already_connected:
-                self.sessions.pop(session).cancel()
-                session.synchronous_close()
-                log.debug("wallet server %s resolves to the same server as %s, rechecking in an hour",
-                          session.server[0], already_connected.server[0])
-                loop.call_later(3600, self._connect_session, session.server)
-                return
+            # duplicate_connections = [
+            #     s for s in self.sessions
+            #     if s is not session and s.server_address_and_port == session.server_address_and_port
+            # ]
+            # already_connected = None if not duplicate_connections else duplicate_connections[0]
+            # if already_connected:
+            #     self.sessions.pop(session).cancel()
+            #     session.synchronous_close()
+            #     log.debug("wallet server %s resolves to the same server as %s, rechecking in an hour",
+            #               session.server[0], already_connected.server[0])
+            #     loop.call_later(3600, self._connect_session, session.server)
+            #     return
             self.new_connection_event.set()
             log.info("connected to %s:%i", *session.server)
 
         return callback
 
-    def _connect_session(self, server: Tuple[str, int]):
-        session = None
-        for s in self.sessions:
-            if s.server == server:
-                session = s
-                break
-        if not session:
-            session = ClientSession(
-                network=self.network, server=server
-            )
-            session._on_connect_cb = self._get_session_connect_callback(session)
-        task = self.sessions.get(session, None)
-        if not task or task.done():
-            task = asyncio.create_task(session.ensure_session())
-            task.add_done_callback(lambda _: self.ensure_connections())
-            self.sessions[session] = task
+    # def _connect_session(self, server: Tuple[str, int]):
+    #     session = None
+    #     for s in self.sessions:
+    #         if s.server == server:
+    #             session = s
+    #             break
+    #     if not session:
+    #         session = ClientSession(
+    #             network=self.network, server=server
+    #         )
+    #         session._on_connect_cb = self._get_session_connect_callback(session)
+    #     task = self.sessions.get(session, None)
+    #     if not task or task.done():
+    #         task = asyncio.create_task(session.ensure_session())
+    #         task.add_done_callback(lambda _: self.ensure_connections())
+    #         self.sessions[session] = task
+
+    async def maintain_k_fastest(self, interface='0.0.0.0', k=3):
+        loop = asyncio.get_event_loop()
+        results: 'asyncio.Queue[Tuple[Tuple[Tuple[str, int], float], PongPacket]]' = asyncio.Queue()
+        connection = SPVStatusClientProtocol(results)
+        resolved_servers = {}
+        resolved_servers_reverse = defaultdict(list)
+        sent = {}
+        k = min(k, len(self._default_servers))
+
+        def ping_servers(_servers):
+            for server in _servers:
+                log.info("ping %s:%i", *server)
+                connection.ping(server)
+                sent[server] = perf_counter()
+
+        async def resolve_spv(server, port):
+            try:
+                server_addr = await resolve_host(server, port, 'udp')
+                resolved_servers[server] = (server_addr, port)
+                resolved_servers_reverse[(server_addr, port)].append(server)
+            except Exception:
+                log.exception("boom")
+                pass
+
+        def teardown(session):
+            task = self.sessions.pop(session, None)
+            if task and not task.done():
+                task.cancel()
+
+        await asyncio.gather(*(resolve_spv(server, port) for (server, port) in self._default_servers))
+
+        log.info("%i / %i possible spv servers to try %i", len(resolved_servers), len(resolved_servers_reverse), len(self._default_servers))
+
+        try:
+            await loop.create_datagram_endpoint(lambda: connection, (interface, 4444), reuse_port=True)
+            ping_servers(resolved_servers_reverse.keys())
+            while len(self.sessions) < k:
+                (remote, ts), pong = await asyncio.wait_for(results.get(), 30)
+                if remote not in sent:
+                    log.warning("unexpected response from %s:%i", *remote)
+                    continue
+                latency = ts - sent[remote]
+                log.info("%s has latency of %sms", '/'.join(resolved_servers_reverse[remote]), round(latency * 1000, 2))
+                session = ClientSession(
+                    network=self.network, server=remote
+                )
+                session._on_connect_cb = self._get_session_connect_callback(session)
+                task = loop.create_task(session.ensure_session())
+                task.add_done_callback(lambda _: teardown(session))
+                self.sessions[session] = task
+        finally:
+            connection.close()
 
     def start(self, default_servers):
-        for server in default_servers:
-            self._connect_session(server)
+        self._default_servers.extend(default_servers)
+        asyncio.create_task(self.maintain_k_fastest())
 
     def stop(self):
-        for session, task in self.sessions.items():
-            task.cancel()
+        for session in self.sessions:
             session.synchronous_close()
         self.sessions.clear()
 
-    def ensure_connections(self):
-        for session in self.sessions:
-            self._connect_session(session.server)
+    # def ensure_connections(self):
+    #     for session in self.sessions:
+    #         self._connect_session(session.server)
 
     def trigger_nodelay_connect(self):
         # used when other parts of the system sees we might have internet back
