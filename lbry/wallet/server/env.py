@@ -81,7 +81,7 @@ class Env:
         self.max_send = self.integer('MAX_SEND', 1000000)
         self.max_receive = self.integer('MAX_RECEIVE', 1000000)
         self.max_subs = self.integer('MAX_SUBS', 250000)
-        self.max_sessions = self.integer('MAX_SESSIONS', 10000)
+        self.max_sessions = self.integer('MAX_SESSIONS', 100000)
         self.max_session_subs = self.integer('MAX_SESSION_SUBS', 50000)
         self.session_timeout = self.integer('SESSION_TIMEOUT', 600)
         self.drop_client = self.custom("DROP_CLIENT", None, re.compile)

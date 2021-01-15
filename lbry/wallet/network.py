@@ -271,7 +271,8 @@ class Network:
                         raise err
                     log.exception("error maintaining connection to spv server")
                 finally:
-                    self.client.synchronous_close()
+                    if self.client:
+                        self.client.synchronous_close()
                     self.client = None
                     self.server_features = None
 
