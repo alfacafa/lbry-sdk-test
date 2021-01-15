@@ -81,7 +81,7 @@ class Env:
         self.max_send = self.integer('MAX_SEND', 1000000)
         self.max_receive = self.integer('MAX_RECEIVE', 1000000)
         self.max_subs = self.integer('MAX_SUBS', 250000)
-        self.max_sessions = self.sane_max_sessions()
+        self.max_sessions = self.integer('MAX_SESSIONS', 10000)
         self.max_session_subs = self.integer('MAX_SESSION_SUBS', 50000)
         self.session_timeout = self.integer('SESSION_TIMEOUT', 600)
         self.drop_client = self.custom("DROP_CLIENT", None, re.compile)
@@ -181,18 +181,18 @@ class Env:
             result = '127.0.0.1'
         return result
 
-    def sane_max_sessions(self):
-        """Return the maximum number of sessions to permit.  Normally this
-        is MAX_SESSIONS.  However, to prevent open file exhaustion, ajdust
-        downwards if running with a small open file rlimit."""
-        env_value = self.integer('MAX_SESSIONS', 1000)
-        nofile_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-        # We give the DB 250 files; allow ElectrumX 100 for itself
-        value = max(0, min(env_value, nofile_limit - 350))
-        if value < env_value:
-            self.logger.warning(f'lowered maximum sessions from {env_value:,d} to {value:,d} '
-                                f'because your open file limit is {nofile_limit:,d}')
-        return value
+    # def sane_max_sessions(self):
+    #     """Return the maximum number of sessions to permit.  Normally this
+    #     is MAX_SESSIONS.  However, to prevent open file exhaustion, ajdust
+    #     downwards if running with a small open file rlimit."""
+    #     env_value = self.integer('MAX_SESSIONS', 1000)
+    #     nofile_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    #     # We give the DB 250 files; allow ElectrumX 100 for itself
+    #     value = max(0, min(env_value, nofile_limit - 350))
+    #     if value < env_value:
+    #         self.logger.warning(f'lowered maximum sessions from {env_value:,d} to {value:,d} '
+    #                             f'because your open file limit is {nofile_limit:,d}')
+    #     return env_value
 
     def clearnet_identity(self):
         host = self.default('REPORT_HOST', None)

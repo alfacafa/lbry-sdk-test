@@ -12,7 +12,7 @@ _MAGIC = 1446058291  # genesis blocktime (which is actually wrong)
 # ping_count_metric = Counter("ping_count", "Number of pings received", namespace='wallet_server_status')
 
 
-class PingPacket(NamedTuple):
+class SPVPing(NamedTuple):
     magic: int
     protocol_version: int
 
@@ -21,7 +21,7 @@ class PingPacket(NamedTuple):
 
     @staticmethod
     def make(protocol_version=1) -> bytes:
-        return PingPacket(_MAGIC, protocol_version).encode()
+        return SPVPing(_MAGIC, protocol_version).encode()
 
     @classmethod
     def decode(cls, packet: bytes):
@@ -31,9 +31,9 @@ class PingPacket(NamedTuple):
         return decoded
 
 
-class PongPacket(NamedTuple):
+class SPVPong(NamedTuple):
     protocol_version: int
-    available: int
+    flags: int
     height: int
     tip: bytes
 
@@ -41,12 +41,20 @@ class PongPacket(NamedTuple):
         return struct.pack(b'!BBl32s', *self)
 
     @staticmethod
-    def make(height: int, tip: bytes, available: int, protocol_version: int = 1) -> bytes:
-        return PongPacket(protocol_version, available, height, tip).encode()
+    def make(height: int, tip: bytes, flags: int, protocol_version: int = 1) -> bytes:
+        return SPVPong(protocol_version, flags, height, tip).encode()
 
     @classmethod
     def decode(cls, packet: bytes):
         return cls(*struct.unpack(b'!BBl32s', packet[:38]))
+
+    @property
+    def available(self) -> bool:
+        return (self.flags & 0b00000001) > 0
+
+    def __repr__(self) -> str:
+        return f"SPVPong(version={self.protocol_version}, available={'True' if self.flags & 1 > 0 else 'False'}," \
+               f" height={self.height}, tip={self.tip[::-1].hex()})"
 
 
 class SPVServerStatusProtocol(asyncio.DatagramProtocol):
@@ -62,7 +70,7 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self.update_cached_response()
 
     def update_cached_response(self):
-        self._cached_response = PongPacket.make(self._height, self._tip, self._flags, self.PROTOCOL_VERSION)
+        self._cached_response = SPVPong.make(self._height, self._tip, self._flags, self.PROTOCOL_VERSION)
 
     def set_unavailable(self):
         self._flags &= 0b11111110
@@ -78,7 +86,7 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         try:
-            PingPacket.decode(data)
+            SPVPing.decode(data)
         except (ValueError, struct.error, AttributeError, TypeError):
             log.exception("derp")
             return

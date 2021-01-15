@@ -115,6 +115,7 @@ class Server:
 
         await self.db.populate_header_merkle_cache()
         await _start_cancellable(self.mempool.keep_synchronized)
+        self.bp.status_server.set_available()
         await _start_cancellable(self.session_mgr.serve, self.notifications)
 
     async def stop(self):
