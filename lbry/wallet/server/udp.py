@@ -1,9 +1,9 @@
 import asyncio
-import typing
 import struct
-import time
+from time import perf_counter
 import logging
 from typing import Optional, Tuple, NamedTuple
+from lbry.utils import LRUCache
 # from prometheus_client import Counter
 
 
@@ -69,7 +69,7 @@ class SPVPong(NamedTuple):
 class SPVServerStatusProtocol(asyncio.DatagramProtocol):
     PROTOCOL_VERSION = 1
 
-    def __init__(self, height: int, tip: bytes):
+    def __init__(self, height: int, tip: bytes, throttle_cache_size: int = 1024, throttle_rate: int = 10):
         super().__init__()
         self.transport: Optional[asyncio.transports.DatagramTransport] = None
         self._height = height
@@ -77,6 +77,10 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self._flags = 0
         self._cached_response = None
         self.update_cached_response()
+        self._throttle = LRUCache(throttle_cache_size)
+        self._time_now = 0.0
+        self._last_ts = perf_counter()
+        self._throttle_rate = throttle_rate
 
     def update_cached_response(self):
         self._cached_response = SPVPong.make(self._height, self._tip, self._flags, self.PROTOCOL_VERSION)
@@ -93,10 +97,22 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self._height, self._tip = height, tip
         self.update_cached_response()
 
+    def should_throttle(self, host: str):
+        key = int(self._time_now).to_bytes(4, byteorder='big') + host.encode()
+        reqs = self._throttle.get(key, default=0) + 1
+        self._throttle[key] = reqs
+        if reqs >= self._throttle_rate:
+            return True
+        return False
+
     def make_pong(self, host):
         return self._cached_response + bytes(int(b) for b in host.split("."))
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
+        now, (host, port) = perf_counter(), addr
+        self._time_now, self._last_ts = self._time_now + (now - self._last_ts), now
+        if self.should_throttle(host):
+            return
         try:
             SPVPing.decode(data)
         except (ValueError, struct.error, AttributeError, TypeError):
