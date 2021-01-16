@@ -219,7 +219,7 @@ class Network:
         connection = SPVStatusClientProtocol(pong_responses)
         sent_ping_timestamps = {}
         hostname_to_ip, ip_to_hostnames = await self.resolve_spv_dns()
-        log.warning("%i possible spv servers to try (%i urls in config)", len(ip_to_hostnames),
+        log.info("%i possible spv servers to try (%i urls in config)", len(ip_to_hostnames),
                     len(self.config['default_servers']))
         pongs = {}
         try:
@@ -233,17 +233,16 @@ class Network:
             while len(pongs) < n:
                 (remote, ts), pong = await asyncio.wait_for(pong_responses.get(), timeout - (perf_counter() - start))
                 latency = ts - start
-                log.warning("%s:%i has latency of %sms (available: %s, height: %i)",
+                log.info("%s:%i has latency of %sms (available: %s, height: %i)",
                             '/'.join(ip_to_hostnames[remote]), remote[1], round(latency * 1000, 2),
                             pong.available, pong.height)
                 if pong.available:
                     pongs[remote] = pong
         except asyncio.TimeoutError:
-            if not pongs:
-                # not online or all packets are lost
-                log.warning("cannot connect to spv servers, retrying later")
+            if pongs:
+                log.info("%i/%i probed spv servers are accepting connections", len(pongs), len(ip_to_hostnames))
             else:
-                log.warning("%i/%i probed spv servers are accepting connections", len(pongs), len(ip_to_hostnames))
+                log.warning("spv status probes failed, retrying later")
         finally:
             connection.close()
             return pongs
@@ -251,7 +250,6 @@ class Network:
     async def connect_to_fastest(self) -> Optional[ClientSession]:
         fastest_spvs = await self.get_n_fastest_spvs()
         for (host, port), pong in fastest_spvs.items():
-            log.warning("attempt tcp connection to %s:%i", host, port)
             client = ClientSession(network=self, server=(host, port))
             try:
                 await client.create_connection()
@@ -264,16 +262,20 @@ class Network:
         return
 
     async def network_loop(self):
-        log.warning("run network loop ")
-        while True:
+        sleep_delay = 30
+        while self.running:
             await asyncio.wait(
                 [asyncio.sleep(30), self._urgent_need_reconnect.wait()], return_when=asyncio.FIRST_COMPLETED
             )
+            if self._urgent_need_reconnect.is_set():
+                sleep_delay = 30
             self._urgent_need_reconnect.clear()
             if not self.is_connected:
                 client = await self.connect_to_fastest()
                 if not client:
                     log.warning("failed to connect to any spv servers, retrying later")
+                    sleep_delay *= 2
+                    sleep_delay = min(sleep_delay, 300)
                     continue
                 log.warning("get spv server features %s:%i", *client.server)
                 features = await client.send_request('server.features', [])
@@ -287,27 +289,11 @@ class Network:
                 self.client = None
                 self.server_features = None
                 log.warning("connection lost to %s", server_str)
-                # try:
-                #     server_str = "%s:%i" % client.server
-                #     log.warning("maintaining connection to spv server %s", server_str)
-                #     await self.client.keepalive_loop()
-                #     log.warning("connection lost to %s", server_str)
-                # except Exception as err:
-                #     if isinstance(err, asyncio.CancelledError):
-                #         log.warning("cancel loop task")
-                #         return
-                #     log.exception("error maintaining connection to spv server")
-                # finally:
-                #     log.warning("loop task finally")
-                #     self.client = None
-                #     self.server_features = None
-        log.warning("network loop finished")
+        log.info("network loop finished")
 
     async def stop(self):
         if self._loop_task and not self._loop_task.done():
-            log.warning("cancel loop")
             self._loop_task.cancel()
-            log.warning("cancelled loop")
         self._loop_task = None
         if self.running:
             self.running = False
