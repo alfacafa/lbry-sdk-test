@@ -69,7 +69,7 @@ class SPVPong(NamedTuple):
 class SPVServerStatusProtocol(asyncio.DatagramProtocol):
     PROTOCOL_VERSION = 1
 
-    def __init__(self, height: int, tip: bytes, throttle_cache_size: int = 1024, throttle_rate: int = 10):
+    def __init__(self, height: int, tip: bytes, throttle_cache_size: int = 1024, throttle_reqs_per_sec: int = 10):
         super().__init__()
         self.transport: Optional[asyncio.transports.DatagramTransport] = None
         self._height = height
@@ -78,9 +78,8 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self._cached_response = None
         self.update_cached_response()
         self._throttle = LRUCache(throttle_cache_size)
-        self._time_now = 0.0
-        self._last_ts = perf_counter()
-        self._throttle_rate = throttle_rate
+        self._should_log = LRUCache(throttle_cache_size)
+        self._min_delay = 1 / throttle_reqs_per_sec
 
     def update_cached_response(self):
         self._cached_response = SPVPong.make(self._height, self._tip, self._flags, self.PROTOCOL_VERSION)
@@ -98,10 +97,14 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self.update_cached_response()
 
     def should_throttle(self, host: str):
-        key = int(self._time_now).to_bytes(4, byteorder='big') + host.encode()
-        reqs = self._throttle.get(key, default=0) + 1
-        self._throttle[key] = reqs
-        if reqs >= self._throttle_rate:
+        now = perf_counter()
+        last_requested = self._throttle.get(host, default=0)
+        self._throttle[host] = now
+        if now - last_requested < self._min_delay:
+            log_cnt = self._should_log.get(host, default=0) + 1
+            if log_cnt % 100 == 0:
+                log.warning("throttle spv status to %s", host)
+            self._should_log[host] = log_cnt
             return True
         return False
 
@@ -109,14 +112,12 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         return self._cached_response + bytes(int(b) for b in host.split("."))
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
-        now, (host, port) = perf_counter(), addr
-        self._time_now, self._last_ts = self._time_now + (now - self._last_ts), now
-        if self.should_throttle(host):
+        if self.should_throttle(addr[0]):
             return
         try:
             SPVPing.decode(data)
         except (ValueError, struct.error, AttributeError, TypeError):
-            log.exception("derp")
+            # log.exception("derp")
             return
         self.transport.sendto(self.make_pong(addr[0]), addr)
         # ping_count_metric.inc()
