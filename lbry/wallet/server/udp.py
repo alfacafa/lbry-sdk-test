@@ -10,22 +10,24 @@ from typing import Optional, Tuple, NamedTuple
 log = logging.getLogger(__name__)
 _MAGIC = 1446058291  # genesis blocktime (which is actually wrong)
 # ping_count_metric = Counter("ping_count", "Number of pings received", namespace='wallet_server_status')
+_PAD_BYTES = b'\x00' * 64
 
 
 class SPVPing(NamedTuple):
     magic: int
     protocol_version: int
+    pad_bytes: bytes
 
     def encode(self):
-        return struct.pack(b'!lB', *self)
+        return struct.pack(b'!lB64s', *self)
 
     @staticmethod
     def make(protocol_version=1) -> bytes:
-        return SPVPing(_MAGIC, protocol_version).encode()
+        return SPVPing(_MAGIC, protocol_version, _PAD_BYTES).encode()
 
     @classmethod
     def decode(cls, packet: bytes):
-        decoded = cls(*struct.unpack(b'!lB', packet[:5]))
+        decoded = cls(*struct.unpack(b'!lB64s', packet[:69]))
         if decoded.magic != _MAGIC:
             raise ValueError("invalid magic bytes")
         return decoded
@@ -36,24 +38,31 @@ class SPVPong(NamedTuple):
     flags: int
     height: int
     tip: bytes
+    source_address_raw: bytes
 
     def encode(self):
-        return struct.pack(b'!BBl32s', *self)
+        return struct.pack(b'!BBl32s4s', *self)
 
     @staticmethod
     def make(height: int, tip: bytes, flags: int, protocol_version: int = 1) -> bytes:
-        return SPVPong(protocol_version, flags, height, tip).encode()
+        # note: drops the last 4 bytes so the result can be cached and have addresses added to it as needed
+        return SPVPong(protocol_version, flags, height, tip, b'\x00\x00\x00\x00').encode()[:38]
 
     @classmethod
     def decode(cls, packet: bytes):
-        return cls(*struct.unpack(b'!BBl32s', packet[:38]))
+        return cls(*struct.unpack(b'!BBl32s4s', packet[:42]))
 
     @property
     def available(self) -> bool:
         return (self.flags & 0b00000001) > 0
 
+    @property
+    def ip_address(self) -> str:
+        return ".".join(map(str, self.source_address_raw))
+
     def __repr__(self) -> str:
-        return f"SPVPong(version={self.protocol_version}, available={'True' if self.flags & 1 > 0 else 'False'}," \
+        return f"SPVPong(external_ip={self.ip_address}, version={self.protocol_version}, " \
+               f"available={'True' if self.flags & 1 > 0 else 'False'}," \
                f" height={self.height}, tip={self.tip[::-1].hex()})"
 
 
@@ -84,13 +93,16 @@ class SPVServerStatusProtocol(asyncio.DatagramProtocol):
         self._height, self._tip = height, tip
         self.update_cached_response()
 
+    def make_pong(self, host):
+        return self._cached_response + bytes(int(b) for b in host.split("."))
+
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         try:
             SPVPing.decode(data)
         except (ValueError, struct.error, AttributeError, TypeError):
             log.exception("derp")
             return
-        self.transport.sendto(self._cached_response, addr)
+        self.transport.sendto(self.make_pong(addr[0]), addr)
         # ping_count_metric.inc()
 
     def connection_made(self, transport) -> None:
