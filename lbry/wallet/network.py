@@ -106,21 +106,25 @@ class ClientSession(BaseClientSession):
             raise IncompatibleWalletServerError(*self.server)
         return response
 
-    async def send_server_keepalive(self, timeout=3):
+    async def keepalive_loop(self, timeout=5):
         try:
             while True:
-                await asyncio.sleep(60)
-                await asyncio.wait_for(
-                    self.send_request('server.ping', []), timeout=timeout
-                )
-                log.warning("%s:%s pong", *self.server)
+                now = perf_counter()
+                if self.last_send + 60 < now:
+                    log.warning("ping")
+                    await asyncio.wait_for(
+                        self.send_request('server.ping', []), timeout=timeout
+                    )
+                    log.warning("pong")
+                else:
+                    await asyncio.sleep(max(0, 60 - (now - self.last_send)))
         except asyncio.CancelledError:
             log.warning("closing connection to %s:%i", *self.server)
         except:
             log.exception("lost connection to spv")
         finally:
             if not self.is_closing():
-                self.synchronous_close()
+                self._close()
 
     async def create_connection(self, timeout=6):
         connector = Connector(lambda: self, *self.server)
@@ -171,6 +175,7 @@ class Network:
 
         self.aiohttp_session: Optional[aiohttp.ClientSession] = None
         self._urgent_need_reconnect = asyncio.Event()
+        self._loop_task: Optional[asyncio.Task] = None
 
     @property
     def config(self):
@@ -208,7 +213,7 @@ class Network:
         await asyncio.gather(*(resolve_spv(server, port) for (server, port) in self.config['default_servers']))
         return hostname_to_ip, ip_to_hostnames
 
-    async def get_n_fastest_spvs(self, n=5, timeout=1.0) -> Dict[Tuple[str, int], SPVPong]:
+    async def get_n_fastest_spvs(self, n=5, timeout=3.0) -> Dict[Tuple[str, int], SPVPong]:
         loop = asyncio.get_event_loop()
         pong_responses = asyncio.Queue()
         connection = SPVStatusClientProtocol(pong_responses)
@@ -233,55 +238,79 @@ class Network:
                             pong.available, pong.height)
                 if pong.available:
                     pongs[remote] = pong
-        except (asyncio.TimeoutError):
-            # not online or all packets are lost
-            log.warning("cannot connect to spv servers, retrying later")
+        except asyncio.TimeoutError:
+            if not pongs:
+                # not online or all packets are lost
+                log.warning("cannot connect to spv servers, retrying later")
+            else:
+                log.warning("%i/%i probed spv servers are accepting connections", len(pongs), len(ip_to_hostnames))
         finally:
             connection.close()
-        return pongs
+            return pongs
+
+    async def connect_to_fastest(self) -> Optional[ClientSession]:
+        fastest_spvs = await self.get_n_fastest_spvs()
+        for (host, port), pong in fastest_spvs.items():
+            log.warning("attempt tcp connection to %s:%i", host, port)
+            client = ClientSession(network=self, server=(host, port))
+            try:
+                await client.create_connection()
+                log.warning("Connected to spv server %s:%i", host, port)
+                await client.ensure_server_version()
+                return client
+            except (asyncio.TimeoutError, ConnectionError, OSError, IncompatibleWalletServerError, RPCError):
+                log.warning("Connecting to %s:%d failed", host, port)
+                client._close()
+        return
 
     async def network_loop(self):
+        log.warning("run network loop ")
         while True:
             await asyncio.wait(
-                [asyncio.sleep(300), self._urgent_need_reconnect.wait()], return_when=asyncio.FIRST_COMPLETED
+                [asyncio.sleep(30), self._urgent_need_reconnect.wait()], return_when=asyncio.FIRST_COMPLETED
             )
             self._urgent_need_reconnect.clear()
-            if self.is_connected:
-                continue
-            for (host, port), pong in (await self.get_n_fastest_spvs()).items():
-                client = ClientSession(network=self, server=(host, port))
-                try:
-                    await client.create_connection()
-                    log.warning("Connected to spv server %s:%i", host, port)
-                    await client.ensure_server_version()
-                    self.client = client
-                except (asyncio.TimeoutError, ConnectionError, OSError, IncompatibleWalletServerError, RPCError):
-                    log.warning("Connecting to %s:%d failed", host, port)
-                    client.synchronous_close()
-                else:
-                    self.server_features = await self.get_server_features()
-                    self._update_remote_height((await self.subscribe_headers(),))
-                    self._on_connected_controller.add(True)
-                    break
-            if self.is_connected:
-                try:
-                    await self.client.send_server_keepalive()
-                except Exception as err:
-                    if isinstance(err, asyncio.CancelledError):
-                        raise err
-                    log.exception("error maintaining connection to spv server")
-                finally:
-                    if self.client:
-                        self.client.synchronous_close()
-                    self.client = None
-                    self.server_features = None
+            if not self.is_connected:
+                client = await self.connect_to_fastest()
+                if not client:
+                    log.warning("failed to connect to any spv servers, retrying later")
+                    continue
+                log.warning("get spv server features %s:%i", *client.server)
+                features = await client.send_request('server.features', [])
+                self.client, self.server_features = client, features
+                log.warning("subscribe to headers %s:%i", *client.server)
+                self._update_remote_height((await self.subscribe_headers(),))
+                self._on_connected_controller.add(True)
+                server_str = "%s:%i" % client.server
+                log.warning("maintaining connection to spv server %s", server_str)
+                await self.client.keepalive_loop()
+                self.client = None
+                self.server_features = None
+                log.warning("connection lost to %s", server_str)
+                # try:
+                #     server_str = "%s:%i" % client.server
+                #     log.warning("maintaining connection to spv server %s", server_str)
+                #     await self.client.keepalive_loop()
+                #     log.warning("connection lost to %s", server_str)
+                # except Exception as err:
+                #     if isinstance(err, asyncio.CancelledError):
+                #         log.warning("cancel loop task")
+                #         return
+                #     log.exception("error maintaining connection to spv server")
+                # finally:
+                #     log.warning("loop task finally")
+                #     self.client = None
+                #     self.server_features = None
+        log.warning("network loop finished")
 
     async def stop(self):
+        if self._loop_task and not self._loop_task.done():
+            log.warning("cancel loop")
+            self._loop_task.cancel()
+            log.warning("cancelled loop")
+        self._loop_task = None
         if self.running:
             self.running = False
-            if self._loop_task:
-                self._loop_task.cancel()
-            self._loop_task = None
             await self.aiohttp_session.close()
 
     @property
