@@ -20,6 +20,7 @@ import pkg_resources
 
 import certifi
 import aiohttp
+from collections import defaultdict
 from prometheus_client import Counter
 from prometheus_client.registry import REGISTRY
 from lbry.schema.claim import Claim
@@ -377,14 +378,62 @@ async def aiohttp_request(method, url, **kwargs) -> typing.AsyncContextManager[a
             yield response
 
 
-async def get_external_ip() -> typing.Optional[str]:  # used if upnp is disabled or non-functioning
+async def fallback_get_external_ip():  # used if spv servers can't be used for ip detection
     try:
         async with aiohttp_request("get", "https://api.lbry.com/ip") as resp:
             response = await resp.json()
             if response['success']:
-                return response['data']['ip']
+                return response['data']['ip'], None
     except Exception:
-        return
+        return None, None
+
+
+async def _get_external_ip(default_servers) -> typing.Tuple[typing.Optional[str], typing.Optional[str]]:
+    # used if upnp is disabled or non-functioning
+    import random
+    from lbry.wallet.server.udp import SPVStatusClientProtocol
+    from lbry.dht.peer import is_valid_public_ipv4
+
+    hostname_to_ip = {}
+    ip_to_hostnames = defaultdict(list)
+
+    async def resolve_spv(server, port):
+        try:
+            server_addr = await resolve_host(server, port, 'udp')
+            hostname_to_ip[server] = (server_addr, port)
+            ip_to_hostnames[(server_addr, port)].append(server)
+        except Exception:
+            log.exception("error looking up dns for spv servers")
+
+    # accumulate the dns results
+
+    await asyncio.gather(*(resolve_spv(server, port) for (server, port) in default_servers))
+
+    loop = asyncio.get_event_loop()
+    pong_responses = asyncio.Queue()
+    connection = SPVStatusClientProtocol(pong_responses)
+    try:
+        await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))  # could raise OSError if it cant bind
+        randomized_servers = list(ip_to_hostnames.keys())
+        random.shuffle(randomized_servers)
+        for server in randomized_servers:
+            connection.ping(server)
+            try:
+                _, pong = await asyncio.wait_for(pong_responses.get(), 1)
+                if is_valid_public_ipv4(pong.ip_address):
+                    return pong.ip_address, ip_to_hostnames[server][0]
+            except asyncio.TimeoutError:
+                pass
+        return None, None
+    finally:
+        connection.close()
+
+
+async def get_external_ip(default_servers) -> typing.Tuple[typing.Optional[str], typing.Optional[str]]:
+    ip_from_spv_servers = await _get_external_ip(default_servers)
+    if not ip_from_spv_servers[1]:
+        return await fallback_get_external_ip()
+    return ip_from_spv_servers
 
 
 def is_running_from_bundle():
