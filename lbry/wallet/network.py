@@ -106,7 +106,7 @@ class ClientSession(BaseClientSession):
             raise IncompatibleWalletServerError(*self.server)
         return response
 
-    async def keepalive_loop(self, timeout=5):
+    async def keepalive_loop(self, timeout=3):
         try:
             while True:
                 now = perf_counter()
