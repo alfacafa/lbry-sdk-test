@@ -689,7 +689,7 @@ class BlockProcessor:
         self._caught_up_event = caught_up_event
         try:
             await self._first_open_dbs()
-            await self.status_server.start(self.db.fs_height, self.db.db_tip, self.env.host, self.env.tcp_port)
+            self.status_server.set_height(self.db.fs_height, self.db.db_tip)
             await asyncio.wait([
                 self.prefetcher.main_loop(self.height),
                 self._process_prefetched_blocks()

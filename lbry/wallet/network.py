@@ -18,12 +18,12 @@ log = logging.getLogger(__name__)
 
 
 class ClientSession(BaseClientSession):
-    def __init__(self, *args, network, server, timeout=30, on_connect_callback=None, **kwargs):
+    def __init__(self, *args, network: 'Network', server, timeout=30, **kwargs):
         self.network = network
         self.server = server
         super().__init__(*args, **kwargs)
-        self._on_disconnect_controller = StreamController()
-        self.on_disconnected = self._on_disconnect_controller.stream
+        # self._on_disconnect_controller = StreamController()
+        # self.on_disconnected = self._on_disconnect_controller.stream
         self.framer.max_size = self.max_errors = 1 << 32
         self.timeout = timeout
         self.max_seconds_idle = timeout * 2
@@ -31,8 +31,6 @@ class ClientSession(BaseClientSession):
         self.connection_latency: Optional[float] = None
         self._response_samples = 0
         self.pending_amount = 0
-        self._on_connect_cb = on_connect_callback or (lambda: None)
-        self.trigger_urgent_reconnect = asyncio.Event()
 
     @property
     def available(self):
@@ -59,7 +57,7 @@ class ClientSession(BaseClientSession):
 
     async def send_request(self, method, args=()):
         self.pending_amount += 1
-        log.debug("send %s%s to %s:%i", method, tuple(args), *self.server)
+        log.debug("send %s%s to %s:%i (%i timeout)", method, tuple(args), self.server[0], self.server[1], self.timeout)
         try:
             if method == 'server.version':
                 return await self.send_timed_server_version_request(args, self.timeout)
@@ -70,7 +68,7 @@ class ClientSession(BaseClientSession):
                     log.debug("Time since last packet: %s", perf_counter() - self.last_packet_received)
                     if (perf_counter() - self.last_packet_received) < self.timeout:
                         continue
-                    log.info("timeout sending %s to %s:%i", method, *self.server)
+                    log.warning("timeout sending %s to %s:%i", method, *self.server)
                     raise asyncio.TimeoutError
                 if done:
                     try:
@@ -90,7 +88,7 @@ class ClientSession(BaseClientSession):
             self.synchronous_close()
             raise
         except asyncio.CancelledError:
-            log.info("cancelled sending %s to %s:%i", method, *self.server)
+            log.warning("cancelled sending %s to %s:%i", method, *self.server)
             # self.synchronous_close()
             raise
         finally:
@@ -98,7 +96,6 @@ class ClientSession(BaseClientSession):
 
     async def ensure_server_version(self, required=None, timeout=3):
         required = required or self.network.PROTOCOL_VERSION
-        log.warning('send version request')
         response = await asyncio.wait_for(
             self.send_request('server.version', [__version__, required]), timeout=timeout
         )
@@ -106,18 +103,16 @@ class ClientSession(BaseClientSession):
             raise IncompatibleWalletServerError(*self.server)
         return response
 
-    async def keepalive_loop(self, timeout=3):
+    async def keepalive_loop(self, timeout=3, max_idle=60):
         try:
             while True:
                 now = perf_counter()
-                if self.last_send + 60 < now:
-                    log.warning("ping")
+                if min(self.last_send, self.last_packet_received) + max_idle < now:
                     await asyncio.wait_for(
                         self.send_request('server.ping', []), timeout=timeout
                     )
-                    log.warning("pong")
                 else:
-                    await asyncio.sleep(max(0, 60 - (now - self.last_send)))
+                    await asyncio.sleep(max(0, max_idle - (now - self.last_send)))
         except asyncio.CancelledError:
             log.warning("closing connection to %s:%i", *self.server)
         except:
@@ -137,12 +132,13 @@ class ClientSession(BaseClientSession):
         controller.add(request.args)
 
     def connection_lost(self, exc):
-        log.debug("Connection lost: %s:%d", *self.server)
+        log.warning("Connection lost: %s:%d", *self.server)
         super().connection_lost(exc)
         self.response_time = None
         self.connection_latency = None
         self._response_samples = 0
-        self._on_disconnect_controller.add(True)
+        # self._on_disconnect_controller.add(True)
+        self.network.disconnect()
 
 
 class Network:
@@ -176,10 +172,16 @@ class Network:
         self.aiohttp_session: Optional[aiohttp.ClientSession] = None
         self._urgent_need_reconnect = asyncio.Event()
         self._loop_task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
 
     @property
     def config(self):
         return self.ledger.config
+
+    def disconnect(self):
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+        self._keepalive_task = None
 
     async def start(self):
         self.running = True
@@ -213,7 +215,7 @@ class Network:
         await asyncio.gather(*(resolve_spv(server, port) for (server, port) in self.config['default_servers']))
         return hostname_to_ip, ip_to_hostnames
 
-    async def get_n_fastest_spvs(self, n=5, timeout=3.0) -> Dict[Tuple[str, int], SPVPong]:
+    async def get_n_fastest_spvs(self, n=5, timeout=3.0, reuse_port=True) -> Dict[Tuple[str, int], SPVPong]:
         loop = asyncio.get_event_loop()
         pong_responses = asyncio.Queue()
         connection = SPVStatusClientProtocol(pong_responses)
@@ -223,8 +225,7 @@ class Network:
                     len(self.config['default_servers']))
         pongs = {}
         try:
-            await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0),
-                                                reuse_port=True)  # could raise OSError if it cant bind
+            await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))  # could raise OSError if it cant bind
             start = perf_counter()
             for server in ip_to_hostnames:
                 connection.ping(server)
@@ -253,7 +254,7 @@ class Network:
             client = ClientSession(network=self, server=(host, port))
             try:
                 await client.create_connection()
-                log.warning("Connected to spv server %s:%i", host, port)
+                log.debug("Connected to spv server %s:%i", host, port)
                 await client.ensure_server_version()
                 return client
             except (asyncio.TimeoutError, ConnectionError, OSError, IncompatibleWalletServerError, RPCError):
@@ -277,33 +278,41 @@ class Network:
                     sleep_delay *= 2
                     sleep_delay = min(sleep_delay, 300)
                     continue
-                log.warning("get spv server features %s:%i", *client.server)
+                log.debug("get spv server features %s:%i", *client.server)
                 features = await client.send_request('server.features', [])
                 self.client, self.server_features = client, features
-                log.warning("subscribe to headers %s:%i", *client.server)
+                log.info("subscribe to headers %s:%i", *client.server)
                 self._update_remote_height((await self.subscribe_headers(),))
                 self._on_connected_controller.add(True)
                 server_str = "%s:%i" % client.server
-                log.warning("maintaining connection to spv server %s", server_str)
-                await self.client.keepalive_loop()
-                self.client = None
-                self.server_features = None
-                log.warning("connection lost to %s", server_str)
+                log.info("maintaining connection to spv server %s", server_str)
+                self._keepalive_task = asyncio.create_task(self.client.keepalive_loop())
+                try:
+                    await self._keepalive_task
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    self._keepalive_task = None
+                    self.client = None
+                    self.server_features = None
+                    log.warning("connection lost to %s", server_str)
         log.info("network loop finished")
 
     async def stop(self):
+        self.running = False
+        self.disconnect()
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
         self._loop_task = None
-        if self.running:
-            self.running = False
+        if self.aiohttp_session:
             await self.aiohttp_session.close()
+            self.aiohttp_session = None
 
     @property
     def is_connected(self):
         return self.client and not self.client.is_closing()
 
-    def rpc(self, list_or_method, args, restricted=True, session=None):
+    def rpc(self, list_or_method, args, restricted=True, session: Optional[ClientSession] = None):
         if session or self.is_connected:
             session = session or self.client
             return session.send_request(list_or_method, args)
@@ -323,7 +332,8 @@ class Network:
                 except asyncio.TimeoutError:
                     log.warning("Wallet server call timed out, retrying.")
                 except ConnectionError:
-                    pass
+                    log.warning("connection error")
+
         raise asyncio.CancelledError()  # if we got here, we are shutting down
 
     def _update_remote_height(self, header_args):
