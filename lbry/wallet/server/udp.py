@@ -158,3 +158,34 @@ class StatusServer:
 
     def set_height(self, height: int, tip: bytes):
         self._protocol.set_height(height, tip)
+
+
+class SPVStatusClientProtocol(asyncio.DatagramProtocol):
+    PROTOCOL_VERSION = 1
+
+    def __init__(self, responses: asyncio.Queue):
+        super().__init__()
+        self.transport: Optional[asyncio.transports.DatagramTransport] = None
+        self.responses = responses
+        self._ping_packet = SPVPing.make(self.PROTOCOL_VERSION)
+
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
+        try:
+            self.responses.put_nowait(((addr, perf_counter()), SPVPong.decode(data)))
+        except (ValueError, struct.error, AttributeError, TypeError, RuntimeError):
+            return
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        log.info("closed udp client")
+        self.transport = None
+
+    def ping(self, server: Tuple[str, int]):
+        self.transport.sendto(self._ping_packet, server)
+
+    def close(self):
+        log.info("close udp client")
+        if self.transport:
+            self.transport.close()

@@ -1,7 +1,6 @@
 import logging
 import asyncio
 import json
-import struct
 from time import perf_counter
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
@@ -12,7 +11,7 @@ from lbry.utils import resolve_host
 from lbry.error import IncompatibleWalletServerError
 from lbry.wallet.rpc import RPCSession as BaseClientSession, Connector, RPCError, ProtocolError
 from lbry.wallet.stream import StreamController
-from lbry.wallet.server.udp import SPVPing, SPVPong
+from lbry.wallet.server.udp import SPVStatusClientProtocol, SPVPong
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +236,7 @@ class Network:
                 log.info("%s:%i has latency of %sms (available: %s, height: %i)",
                             '/'.join(ip_to_hostnames[remote]), remote[1], round(latency * 1000, 2),
                             pong.available, pong.height)
+
                 if pong.available:
                     pongs[remote] = pong
         except asyncio.TimeoutError:
@@ -424,33 +424,3 @@ class Network:
             result = await r.json()
             return result['result']
 
-
-class SPVStatusClientProtocol(asyncio.DatagramProtocol):
-    PROTOCOL_VERSION = 1
-
-    def __init__(self, responses: asyncio.Queue):
-        super().__init__()
-        self.transport: Optional[asyncio.transports.DatagramTransport] = None
-        self.responses = responses
-        self._ping_packet = SPVPing.make(self.PROTOCOL_VERSION)
-
-    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
-        try:
-            self.responses.put_nowait(((addr, perf_counter()), SPVPong.decode(data)))
-        except (ValueError, struct.error, AttributeError, TypeError, RuntimeError):
-            return
-
-    def connection_made(self, transport) -> None:
-        self.transport = transport
-
-    def connection_lost(self, exc: Optional[Exception]) -> None:
-        log.info("closed udp client")
-        self.transport = None
-
-    def ping(self, server: Tuple[str, int]):
-        self.transport.sendto(self._ping_packet, server)
-
-    def close(self):
-        log.info("close udp client")
-        if self.transport:
-            self.transport.close()
