@@ -364,7 +364,7 @@ class FileManagerComponent(Component):
         self.file_manager.source_managers['stream'] = StreamManager(
             loop, self.conf, blob_manager, wallet, storage, node,
         )
-        if TorrentSession:
+        if TorrentSession and LIBTORRENT_COMPONENT not in self.conf.components_to_skip:
             self.file_manager.source_managers['torrent'] = TorrentManager(
                 loop, self.conf, torrent, storage, self.component_manager.analytics_manager
             )
