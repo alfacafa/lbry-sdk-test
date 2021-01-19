@@ -321,6 +321,7 @@ class CommandTestCase(IntegrationTestCase):
         self.server_blob_manager = None
         self.server = None
         self.reflector = None
+        self.skip_libtorrent = True
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -394,8 +395,10 @@ class CommandTestCase(IntegrationTestCase):
         conf.transaction_cache_size = 10000
         conf.components_to_skip = [
             DHT_COMPONENT, UPNP_COMPONENT, HASH_ANNOUNCER_COMPONENT,
-            PEER_PROTOCOL_SERVER_COMPONENT, LIBTORRENT_COMPONENT
+            PEER_PROTOCOL_SERVER_COMPONENT
         ]
+        if self.skip_libtorrent:
+            conf.components_to_skip.append(LIBTORRENT_COMPONENT)
         wallet_node.manager.config = conf
 
         def wallet_maker(component_manager):
