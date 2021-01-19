@@ -215,7 +215,7 @@ class Network:
         await asyncio.gather(*(resolve_spv(server, port) for (server, port) in self.config['default_servers']))
         return hostname_to_ip, ip_to_hostnames
 
-    async def get_n_fastest_spvs(self, n=5, timeout=3.0, reuse_port=True) -> Dict[Tuple[str, int], SPVPong]:
+    async def get_n_fastest_spvs(self, n=5, timeout=3.0) -> Dict[Tuple[str, int], SPVPong]:
         loop = asyncio.get_event_loop()
         pong_responses = asyncio.Queue()
         connection = SPVStatusClientProtocol(pong_responses)

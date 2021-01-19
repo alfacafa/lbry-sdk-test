@@ -213,7 +213,7 @@ class SessionManager:
 
         host, port = args[:2]
         try:
-            self.servers[kind] = await loop.create_server(protocol_factory, *args, reuse_port=True, **kw_args)
+            self.servers[kind] = await loop.create_server(protocol_factory, *args, **kw_args)
         except OSError as e:    # don't suppress CancelledError
             self.logger.error(f'{kind} server failed to listen on {host}:'
                               f'{port:d} :{e!r}')

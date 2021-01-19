@@ -137,12 +137,12 @@ class StatusServer:
     def __init__(self):
         self._protocol: Optional[SPVServerStatusProtocol] = None
 
-    async def start(self, height: int, tip: bytes, interface: str, port: int, reuse_port=True):
+    async def start(self, height: int, tip: bytes, interface: str, port: int):
         if self._protocol:
             return
         loop = asyncio.get_event_loop()
         self._protocol = SPVServerStatusProtocol(height, tip)
-        await loop.create_datagram_endpoint(lambda: self._protocol, (interface, port), reuse_port=reuse_port)
+        await loop.create_datagram_endpoint(lambda: self._protocol, (interface, port))
         log.info("started udp status server on %s:%i", interface, port)
 
     def stop(self):
