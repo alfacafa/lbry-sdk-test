@@ -247,7 +247,7 @@ class Network:
             else:
                 log.warning("%i spv status probes failed, retrying later. servers tried: %s",
                             len(sent_ping_timestamps),
-                            ', '.join('/'.join(urls) for urls in ip_to_hostnames.values()))
+                            ', '.join('/'.join(hosts) + f' ({ip})' for ip, hosts in ip_to_hostnames.items()))
             return pongs
         finally:
             connection.close()
