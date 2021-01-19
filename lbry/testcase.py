@@ -23,10 +23,9 @@ from lbry.wallet.orchstr8.node import BlockchainNode, WalletNode
 from lbry.extras.daemon.daemon import Daemon, jsonrpc_dumps_pretty
 from lbry.extras.daemon.components import Component, WalletComponent
 from lbry.extras.daemon.components import (
-    DATABASE_COMPONENT, BLOB_COMPONENT, WALLET_COMPONENT, DHT_COMPONENT,
-    HASH_ANNOUNCER_COMPONENT, FILE_MANAGER_COMPONENT, PEER_PROTOCOL_SERVER_COMPONENT,
-    UPNP_COMPONENT, EXCHANGE_RATE_MANAGER_COMPONENT, WALLET_SERVER_PAYMENTS_COMPONENT,
-    LIBTORRENT_COMPONENT
+    DHT_COMPONENT,
+    HASH_ANNOUNCER_COMPONENT, PEER_PROTOCOL_SERVER_COMPONENT,
+    UPNP_COMPONENT, EXCHANGE_RATE_MANAGER_COMPONENT, LIBTORRENT_COMPONENT
 )
 from lbry.extras.daemon.componentmanager import ComponentManager
 from lbry.extras.daemon.exchange_rate_manager import (

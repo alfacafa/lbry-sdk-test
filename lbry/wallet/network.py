@@ -112,10 +112,11 @@ class ClientSession(BaseClientSession):
                     )
                 else:
                     await asyncio.sleep(max(0, max_idle - (now - self.last_send)))
-        except asyncio.CancelledError:
-            log.warning("closing connection to %s:%i", *self.server)
-        except:
-            log.exception("lost connection to spv")
+        except Exception as err:
+            if isinstance(err, asyncio.CancelledError):
+                log.warning("closing connection to %s:%i", *self.server)
+            else:
+                log.exception("lost connection to spv")
         finally:
             if not self.is_closing():
                 self._close()
@@ -189,14 +190,14 @@ class Network:
         self._loop_task = asyncio.create_task(self.network_loop())
         self._urgent_need_reconnect.set()
 
-        def cb(f):
+        def loop_task_done_callback(f):
             try:
                 f.result()
-            except:
+            except Exception:
                 if self.running:
                     log.exception("wallet server connection loop crashed")
 
-        self._loop_task.add_done_callback(cb)
+        self._loop_task.add_done_callback(loop_task_done_callback)
 
     async def resolve_spv_dns(self):
         hostname_to_ip = {}
@@ -219,38 +220,39 @@ class Network:
         pong_responses = asyncio.Queue()
         connection = SPVStatusClientProtocol(pong_responses)
         sent_ping_timestamps = {}
-        hostname_to_ip, ip_to_hostnames = await self.resolve_spv_dns()
+        _, ip_to_hostnames = await self.resolve_spv_dns()
         log.info("%i possible spv servers to try (%i urls in config)", len(ip_to_hostnames),
-                    len(self.config['default_servers']))
+                 len(self.config['default_servers']))
         pongs = {}
         try:
-            await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))  # could raise OSError if it cant bind
+            await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))
+            # could raise OSError if it cant bind
             start = perf_counter()
             for server in ip_to_hostnames:
                 connection.ping(server)
                 sent_ping_timestamps[server] = perf_counter()
-
             while len(pongs) < n:
                 (remote, ts), pong = await asyncio.wait_for(pong_responses.get(), timeout - (perf_counter() - start))
                 latency = ts - start
                 log.info("%s:%i has latency of %sms (available: %s, height: %i)",
-                            '/'.join(ip_to_hostnames[remote]), remote[1], round(latency * 1000, 2),
-                            pong.available, pong.height)
+                         '/'.join(ip_to_hostnames[remote]), remote[1], round(latency * 1000, 2),
+                         pong.available, pong.height)
 
                 if pong.available:
                     pongs[remote] = pong
+                return pongs
         except asyncio.TimeoutError:
             if pongs:
                 log.info("%i/%i probed spv servers are accepting connections", len(pongs), len(ip_to_hostnames))
             else:
                 log.warning("spv status probes failed, retrying later")
+            return pongs
         finally:
             connection.close()
-            return pongs
 
     async def connect_to_fastest(self) -> Optional[ClientSession]:
         fastest_spvs = await self.get_n_fastest_spvs()
-        for (host, port), pong in fastest_spvs.items():
+        for (host, port) in fastest_spvs:
             client = ClientSession(network=self, server=(host, port))
             try:
                 await client.create_connection()
@@ -423,4 +425,3 @@ class Network:
         async with self.aiohttp_session.post(server, json=message) as r:
             result = await r.json()
             return result['result']
-

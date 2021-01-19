@@ -17,10 +17,8 @@ import functools
 import collections
 import hashlib
 import pkg_resources
-
 import certifi
 import aiohttp
-from collections import defaultdict
 from prometheus_client import Counter
 from prometheus_client.registry import REGISTRY
 from lbry.schema.claim import Claim
@@ -410,11 +408,10 @@ async def fallback_get_external_ip():  # used if spv servers can't be used for i
 
 async def _get_external_ip(default_servers) -> typing.Tuple[typing.Optional[str], typing.Optional[str]]:
     # used if upnp is disabled or non-functioning
-    import random
-    from lbry.wallet.server.udp import SPVStatusClientProtocol
+    from lbry.wallet.server.udp import SPVStatusClientProtocol  # pylint: disable=C0415
 
     hostname_to_ip = {}
-    ip_to_hostnames = defaultdict(list)
+    ip_to_hostnames = collections.defaultdict(list)
 
     async def resolve_spv(server, port):
         try:
@@ -425,14 +422,14 @@ async def _get_external_ip(default_servers) -> typing.Tuple[typing.Optional[str]
             log.exception("error looking up dns for spv servers")
 
     # accumulate the dns results
-
     await asyncio.gather(*(resolve_spv(server, port) for (server, port) in default_servers))
 
     loop = asyncio.get_event_loop()
     pong_responses = asyncio.Queue()
     connection = SPVStatusClientProtocol(pong_responses)
     try:
-        await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))  # could raise OSError if it cant bind
+        await loop.create_datagram_endpoint(lambda: connection, ('0.0.0.0', 0))
+        # could raise OSError if it cant bind
         randomized_servers = list(ip_to_hostnames.keys())
         random.shuffle(randomized_servers)
         for server in randomized_servers:
