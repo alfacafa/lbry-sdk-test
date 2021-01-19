@@ -184,11 +184,12 @@ class Network:
         self._keepalive_task = None
 
     async def start(self):
-        self.running = True
-        self.aiohttp_session = aiohttp.ClientSession()
-        self.on_header.listen(self._update_remote_height)
-        self._loop_task = asyncio.create_task(self.network_loop())
-        self._urgent_need_reconnect.set()
+        if not self.running:
+            self.running = True
+            self.aiohttp_session = aiohttp.ClientSession()
+            self.on_header.listen(self._update_remote_height)
+            self._loop_task = asyncio.create_task(self.network_loop())
+            self._urgent_need_reconnect.set()
 
         def loop_task_done_callback(f):
             try:
@@ -240,7 +241,7 @@ class Network:
 
                 if pong.available:
                     pongs[remote] = pong
-                return pongs
+            return pongs
         except asyncio.TimeoutError:
             if pongs:
                 log.info("%i/%i probed spv servers are accepting connections", len(pongs), len(ip_to_hostnames))

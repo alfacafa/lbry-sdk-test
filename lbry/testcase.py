@@ -74,7 +74,7 @@ class ColorHandler(logging.StreamHandler):
 
 HANDLER = ColorHandler(sys.stdout)
 HANDLER.setFormatter(
-    logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.Formatter('%(asctime)s - %(name)s:%(lineno)s - %(levelname)s - %(message)s')
 )
 logging.getLogger().addHandler(HANDLER)
 
