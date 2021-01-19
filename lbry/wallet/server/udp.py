@@ -142,6 +142,7 @@ class StatusServer:
             return
         loop = asyncio.get_event_loop()
         self._protocol = SPVServerStatusProtocol(height, tip)
+        interface = interface if interface.lower() != 'localhost' else '127.0.0.1'
         await loop.create_datagram_endpoint(lambda: self._protocol, (interface, port))
         log.info("started udp status server on %s:%i", interface, port)
 
