@@ -174,7 +174,7 @@ class ServerPickingTestCase(AsyncioTestCase):
         await self._make_udp_server(port)
         return '127.0.0.1', port
 
-    async def test_pick_fastest(self):
+    async def _test_pick_fastest(self):
         ledger = Mock(config={
             'default_servers': [
                 # fast but unhealthy, should be discarded
