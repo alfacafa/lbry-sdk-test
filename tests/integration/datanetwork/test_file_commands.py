@@ -9,8 +9,11 @@ from lbry.wallet import Transaction
 
 
 class FileCommands(CommandTestCase):
-    async def initialize_torrent(self, tx_to_update=None):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
         self.skip_libtorrent = False
+
+    async def initialize_torrent(self, tx_to_update=None):
         if not hasattr(self, 'seeder_session'):
             self.seeder_session = TorrentSession(self.loop, None)
             self.addCleanup(self.seeder_session.stop)
