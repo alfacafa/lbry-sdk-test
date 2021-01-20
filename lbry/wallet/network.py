@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+import socket
 from time import perf_counter
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
@@ -209,8 +210,10 @@ class Network:
                 server_addr = await resolve_host(server, port, 'udp')
                 hostname_to_ip[server] = (server_addr, port)
                 ip_to_hostnames[(server_addr, port)].append(server)
+            except socket.error:
+                log.warning("error looking up dns for spv server %s:%i", server, port)
             except Exception:
-                log.exception("error looking up dns for spv servers")
+                log.exception("error looking up dns for spv server %s:%i", server, port)
 
         # accumulate the dns results
         await asyncio.gather(*(resolve_spv(server, port) for (server, port) in self.config['default_servers']))
@@ -256,10 +259,11 @@ class Network:
     async def connect_to_fastest(self) -> Optional[ClientSession]:
         fastest_spvs = await self.get_n_fastest_spvs()
         for (host, port) in fastest_spvs:
+
             client = ClientSession(network=self, server=(host, port))
             try:
                 await client.create_connection()
-                log.debug("Connected to spv server %s:%i", host, port)
+                log.warning("Connected to spv server %s:%i", host, port)
                 await client.ensure_server_version()
                 return client
             except (asyncio.TimeoutError, ConnectionError, OSError, IncompatibleWalletServerError, RPCError):
@@ -293,7 +297,15 @@ class Network:
                 log.info("maintaining connection to spv server %s", server_str)
                 self._keepalive_task = asyncio.create_task(self.client.keepalive_loop())
                 try:
-                    await self._keepalive_task
+                    await asyncio.wait(
+                        [self._keepalive_task, self._urgent_need_reconnect.wait()],
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if self._urgent_need_reconnect.is_set():
+                        log.warning("urgent reconnect needed")
+                        self._urgent_need_reconnect.clear()
+                    if self._keepalive_task and not self._keepalive_task.done():
+                        self._keepalive_task.cancel()
                 except asyncio.CancelledError:
                     pass
                 finally:
